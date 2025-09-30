@@ -2,31 +2,35 @@
 //    MiS Rain Gauge
 
 #include <HX711.h>
-#include <Servo.h>
+//#include <Servo.h>
+#include <ESP8266_ISR_Servo.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
 #include <WiFiUdp.h>
+#include <BMP280.h>
 
-#define MY_PIN D4
-#define MY_MIN 500
-#define MY_MAX 2500
+#define MY_PIN D7
+#define MY_MIN 800
+#define MY_MAX 2450
 #define MY_MID 1500
 #define MY_DEL 15
 #define MY_HOME 130
-#define MY_MOUT 27
-#define MY_SDA D2
-#define MY_SCL D1
-#define MY_HXD D5
-#define MY_HXC D6
+#define MY_MOUT 20
+#define MY_SDA D1
+#define MY_SCL D2
+#define MY_HXD D6
+#define MY_HXC D5
 #define MSG_BUFFER_SIZE 50
 #define MQTT_SIZE 20
+#define TWEIGHT 25
+#define PERIOD 10
 
 #define SizePass 20
 
-Servo myservo;  // create servo object to control a servo
+//Servo myservo;  // create servo object to control a servo
 
 /*  variable instantiation  */
 
@@ -58,6 +62,7 @@ const char* Version       = "0.1";
 
 char MQTT_server[20];
 char MQTT_PUB[200], MQTT_IN[MQTT_SIZE], MQTT_OUT[MQTT_SIZE], MQTT_RST[MQTT_SIZE], MQTT_STATIN[MQTT_SIZE], MQTT_STATOUT[ MQTT_SIZE], MiS_HEAD[10];
+char MQTT_TIME[20];
 
 int MQTT_PORT = 1883;
 char my_dir[ 10 ];
@@ -66,18 +71,26 @@ char PUB_message[MSG_BUFFER_SIZE], SUB_message[MSG_BUFFER_SIZE];
 char MQTT_in_buffer[MSG_BUFFER_SIZE], MQTT_in_topic[20];
 char my_IP_Address[20];  //  xxx:qsort.xxx.xxx.xxx
 int MQTT_in_flag, MQTT_in_length;
-unsigned long epoch = 0, pulse, payload_time;
+unsigned long epoch = 0, now = 0, interval = 0, pulse, payload_time;
 uint8_t i = 0, rtn = 0, count = 0;
 int net, network, networks;
-int in, now, then, pa, period;
+int in, then, pa, period;
 char * q;
+/*  time variables */
+char a_timestamp[ 13 ], a_year[ 5 ], a_month[ 4 ], a_day[ 4 ], a_hour[ 4 ], a_minute[ 4 ], a_second[ 4 ];
+char a_date[ 20 ];
+long int timestamp;
+int year, month, day, hour, minute, second;
+int servo = 0;
+int time_flag = 0;
 
 int ON  = 1;
 int OFF = 0;
 
-int sequence = 0;
+int sequence = 0, tips = 0;
 uint8_t dataPin  = MY_HXD;
 uint8_t clockPin = MY_HXC;
+float weight = 0, oweight = 0;
 
 /*  Instance creation */
 
@@ -86,6 +99,8 @@ WiFiClient espClient;              // WiFi instance
 PubSubClient client(espClient);    // MQTT instance
 
 HX711 scale;                        // HX711 instance
+
+BMP280 bmp;
 /*
  *	Setup
  */
@@ -103,7 +118,7 @@ void setup()
   sprintf( MQTT_RST,      "%s/%s", MiS_HEAD, RST_TOPIC );
   sprintf( MQTT_STATIN,   "%s/%s", MiS_HEAD, STAT_IN_TOPIC );
   sprintf( MQTT_STATOUT,  "%s/%s", MiS_HEAD, STAT_OUT_TOPIC );
-  
+  sprintf( MQTT_TIME,     "%s/%s", MiS_BASE, "TIME");
 /*
  *  decrypt passwords
  */
@@ -126,22 +141,26 @@ void setup()
  *  Connect to recognised WiFi
  */
   int count = 0;
-  Serial.print(" WiFi Connecting ");
+  Serial.println(" WiFi Connecting ");
   fn_WiFi_Connect( net );
   Serial.print( "IP Address : " );
   Serial.println( WiFi.localIP().toString().c_str() );
+  Serial.println(" WiFi Connected");
 
 /*
  *  MQTT setup
  */
+   Serial.println (" MQTT Connecting ");
   client.setServer(MQTT_server, MQTT_PORT);
   client.setCallback(MQTT_CB);
   delay(1000);
   client.loop();
   fn_MQTT_Connect();
+  Serial.println(" MQTT Connected ");
 /*
  *	Arduino OTA Setup
  */ 
+  Serial.println(" OTA Connecting ");
   ArduinoOTA.setHostname("newvane");
   ArduinoOTA.setPassword("starwest");
 /*
@@ -176,35 +195,37 @@ void setup()
 
   ArduinoOTA.begin();
 
+  Serial.println(" OTA Connected ");
+
   epoch = millis();      //  start the clock
 
-  Serial.println();
-  Serial.println(__FILE__);
-  Serial.print("HX711_LIB_VERSION: ");
-  Serial.println(HX711_LIB_VERSION);
-  Serial.println();
-
-  myservo.attach( MY_PIN, MY_MIN, MY_MAX, MY_MID );
+  servo = ISR_Servo.setupServo(MY_PIN, MY_MIN,  MY_MAX);
+  if (servo != -1) {
+    Serial.println(F("Setup Servo1 OK"));
+   } else {
+    Serial.println(F("Setup Servo1 failed"));
+  }
+  //myservo.attach( MY_PIN, MY_MIN, MY_MAX, MY_MID );
 
   scale.begin(MY_HXD, MY_HXC);
 
   if ( !scale.is_ready() ) delay(1000);
 
-  Serial.print("UNITS: ");
-  Serial.println(scale.get_units(10));
-  Serial.print("Read:");
-  Serial.println( scale.read() );
-
-//  scale.set_scale( -8829.607143 );       //  TODO you need to calibrate this yourself.
-//  scale.set_offset(-1125202);
-  scale.set_scale( -9000 );       //  TODO you need to calibrate this yourself.
+  scale.set_scale( -9000 );
   scale.set_offset(-110000);
 
   //  reset the scale to zero = 0
   scale.tare(10);
-  Serial.print("UNITS: ");
-  Serial.println(scale.get_units(10));
-  myservo.write( MY_HOME );
+
+  //myservo.write( MY_HOME );
+  ISR_Servo.setPosition(servo, MY_HOME);
+
+  //analogWriteFreq( 200 );
+  Wire.begin( D1, D2 );
+
+  bmp.begin();
+
+  Serial.println(" Setup ends ");
 }
 
 void fn_tip( void )
@@ -212,13 +233,14 @@ void fn_tip( void )
   int pos = 0;
   for ( pos = MY_HOME; pos >= MY_MOUT; pos-- )
   {
-    myservo.write( pos );
+    ISR_Servo.setPosition(servo, pos);
+ //   myservo.write( pos );
     delay( 10 );
   }
   delay( 2000 );
-  myservo.write( MY_HOME );
-//  fn_calibrate();
-  epoch = 0;
+  ISR_Servo.setPosition(servo, MY_HOME);
+//  myservo.write( MY_HOME );
+  tips++;
 }
 
 /*
@@ -227,19 +249,9 @@ void fn_tip( void )
 int fn_WiFiScan() {
   int network;
   int networks = WiFi.scanNetworks();
-  Serial.print("Networks found : ");
-  Serial.println( networks );
 
   if (networks == 0) return (-2);               // No Networks found
 
-  for (network = 0; network <= networks; network++) {
-    Serial.print( "Network : " );
-    Serial.print( network );
-    Serial.print( " : " );
-    Serial.print( WiFi.SSID(network).c_str());
-    Serial.print( " : " );
-  	Serial.println( WiFi.RSSI() ); // Get the RSSI value
-  }
   for (network = 0; network <= networks; network++) {
     if (strcmp(WiFi.SSID(network).c_str(), Rich_WiFi) == 0) {
       strcpy(WiFi_Pass, Rich_Pass);
@@ -301,7 +313,48 @@ int MQTT_CB(char* topic, byte* payload, uint8_t length) {
   Serial.print( MQTT_in_topic );
   Serial.print( " : " );
   Serial.println( MQTT_in_buffer );
-  
+
+  if ( strcmp( MQTT_in_topic, MQTT_TIME) == 0)  // Time Pulse  
+  {
+    Serial.print( "MQTT Time : " );
+    Serial.println( MQTT_in_buffer );
+//  1296651311^2025/09/27^14:45:01
+//  012345678901234567890123456789
+    for ( i=0; i<=9; i++ )
+    {
+      a_timestamp[ i ] = MQTT_in_buffer[ i ];
+    }
+    a_timestamp[ 10 ] = 0;
+    timestamp = atof( a_timestamp );
+    for ( i=11; i<=14; i++ )
+    {
+      a_year[ i - 11 ] = MQTT_in_buffer[ i ];
+    }
+    a_year[ 4 ] = 0;
+    year = atoi( a_year );
+    a_month[ 0 ] = MQTT_in_buffer[ 16 ];
+    a_month[ 1 ] = MQTT_in_buffer[ 17 ];
+    a_month[ 2 ] = 0;
+    month = atoi( a_month );
+    a_day[ 0 ] = MQTT_in_buffer[ 19 ];
+    a_day[ 1 ] = MQTT_in_buffer[ 20 ];
+    a_day[ 2 ] = 0;
+    sprintf( a_date, "%s/%s/%s", a_day, a_month, a_year );
+    day = atoi( a_day );
+    a_hour[ 0 ] = MQTT_in_buffer[ 22 ];
+    a_hour[ 1 ] = MQTT_in_buffer[ 23 ];
+    a_hour[ 2 ] = 0;
+    hour = atoi( a_hour );
+    a_minute[ 0 ] = MQTT_in_buffer[ 25 ];
+    a_minute[ 1 ] = MQTT_in_buffer[ 26 ];
+    a_minute[ 2 ] = 0;
+    minute = atoi( a_minute );
+    a_second[ 0 ] = MQTT_in_buffer[ 28 ];
+    a_second[ 1 ] = MQTT_in_buffer[ 29 ];
+    a_second[ 2 ] = 0;
+    second = atoi( a_second );
+    client.unsubscribe( MQTT_TIME );
+  }
   if (strcmp(MQTT_in_topic, MQTT_STATIN) == 0)  // Status Enquiry
   {
     if (strcmp(MQTT_in_buffer, "ASK") == 0)
@@ -327,6 +380,7 @@ int fn_MQTT_Connect() {
       delay(2000);
       client.subscribe(MQTT_RST,  1);
       client.subscribe(MQTT_STATIN, 1);
+      client.subscribe(MQTT_TIME, 1);
       return (0);
     }
     Serial.print(F("."));
@@ -341,68 +395,49 @@ void fn_ReStart(void) {
   ESP.restart();
 }
 
-void fn_calibrate()
-{
-  Serial.println("\n\nCALIBRATION\n===========");
-  Serial.println("remove all weight from the loadcell");
-  Serial.println("Determine zero weight offset");
-  //  average 20 measurements.
-  scale.tare(20);
-  int32_t offset = scale.get_offset();
-
-  Serial.print("OFFSET: ");
-  Serial.println(offset);
-  Serial.println();
-  delay(5000);
-  uint32_t weight = 7;
-  
-  Serial.print("WEIGHT: ");
-  Serial.println(weight);
-  scale.calibrate_scale(weight, 20);
-  float my_scale = scale.get_scale();
-
-  Serial.print("SCALE:  ");
-  Serial.println(my_scale, 6);
-
-  Serial.print("\nuse scale.set_offset(");
-  Serial.print(offset);
-  Serial.print("); and scale.set_scale(");
-  Serial.print(my_scale, 6);
-  Serial.print(");\n");
-  Serial.println("in the setup of your project");
-
-  Serial.println("\n\n");
-}
-
 void loop()
 {
-    ArduinoOTA.handle();
   epoch = millis();
+  client.loop();
+  float temp = bmp.getTemperature();
+
+  ArduinoOTA.handle();
   sequence++;
-  float weight = 0;
+  weight = 0;
   if (scale.is_ready())
   {
     weight = scale.get_units(10);
-    float readw =   scale.read_average( 10 );
+   // float readw =   scale.read_average( 10 );
+    if ( weight < 0 ) weight = 0 - weight;
+    if ( weight > ( TWEIGHT + 10 ) ) weight = oweight;
+    sprintf( MQTT_PUB, "$%05i,%s,%02i:%02i:%02i,%05i,%05i,%07.2f,%07.2f#", sequence, a_date, hour, minute, second, epoch - now, tips, temp, weight );
 
-    //Serial.print( epoch );
-    //Serial.print( " : " );
-    //Serial.print(weight);
-    //Serial.print( " Read :" );
-    //Serial.println( readw);
-
-    sprintf( MQTT_PUB, "$%05i,%05i,%03.2f", sequence, epoch - now, weight);
-    strcat( MQTT_PUB, "#" );
     if (!client.connected()) fn_MQTT_Connect();
     client.publish(MQTT_OUT, (const uint8_t*)MQTT_PUB, strlen(MQTT_PUB), false);
     Serial.println( MQTT_PUB);
-    now = epoch;
-    if ( weight < -25 ) fn_tip();
-    if ( weight > 40 ) fn_tip();
+
+    if ( weight >= TWEIGHT ) fn_tip();
+    oweight = weight;
   }
-  
-  //fn_tip();
-  delay(1000);
+  interval = millis() - epoch;
+
+  second = second + PERIOD;
+  if ( second >= 60 ) {
+    minute++;
+    second = second - 60;
+    if ( minute >= 60 ) {
+      hour++;
+      minute = minute - 60;
+      if ( hour >= 24 ) hour = hour - 24; 
+    }
+  }
+  if ( hour == 0 ) {
+    if ( minute == 5 ) {
+        client.subscribe( MQTT_TIME );
+    }
+  }
+  now = epoch;
+  delay( ( PERIOD * 1000 ) - interval );
 }
 //  -- END OF FILE --
 
