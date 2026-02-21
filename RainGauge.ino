@@ -6,8 +6,8 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Wire.h>
-//#include <ESP8266mDNS.h>
-//#include <ArduinoOTA.h>
+#include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
 #include <WiFiUdp.h>
 #include <PTSolns_AHTx.h>
 #include <BMx280.h>
@@ -24,9 +24,12 @@
 #define MY_HXD D7
 #define MY_HXC D6
 #define MSG_BUFFER_SIZE 50
-#define MQTT_SIZE 20
+#define MQTT_SIZE 30
 #define TWEIGHT 5
 #define PERIOD 30
+
+#define OTA_port 8266
+#define OTA_pwd "mis-pwd"
 
 #define SizePass 20
 
@@ -51,27 +54,30 @@ const char* Rich_WiFi     = "GOULDWAN24";
 char Rich_Pass[SizePass]  = "Tgkf2;47cd";
 const char* Rich_MQTT     = "192.168.1.178";
 
-const char* MiS_BASE      = "MiS";
-const char* MiS_DEVICE    = "RAIN";
-const char* IN_TOPIC      = "FromMaster";
-const char* OUT_TOPIC     = "Data";
-const char* RST_TOPIC     = "RST";
-const char* STAT_IN_TOPIC = "STAT/IN";
-const char* STAT_OUT_TOPIC = "STAT/OUT";
-const char* Version       = "0.1";
+const char MiS_BASE[4]       = "MiS";
+const char MiS_DEVICE[7]     = "RAIN_1";
+const char OUT_TOPIC[5]      = "Data";
+const char RST_TOPIC[4]      = "RST";
+const char STAT_IN_TOPIC[8]  = "STAT/IN";
+const char STAT_OUT_TOPIC[9] = "STAT/OUT";
+const char Version[4]        = "0.1";
+const char TIME_TOPIC[5]     = "TIME";
+const char TIP_TOPIC[4]      = "TIP";
 
-char MQTT_server[20];
-char MQTT_PUB[200], MQTT_IN[MQTT_SIZE], MQTT_OUT[MQTT_SIZE], MQTT_RST[MQTT_SIZE], MQTT_STATIN[MQTT_SIZE], MQTT_STATOUT[ MQTT_SIZE], MiS_HEAD[10];
-char MQTT_TIME[20], MQTT_TIP[20];
+char MQTT_server[20], MQTT_PUB[200];
+char MQTT_IN[MQTT_SIZE], MQTT_OUT[MQTT_SIZE], MQTT_RST[MQTT_SIZE], MQTT_STATIN[MQTT_SIZE];
+char MQTT_STATOUT[ MQTT_SIZE], MiS_HEAD[15];
+char MQTT_TIME[50], MQTT_TIP[MQTT_SIZE], MQTT_DEVICES[50];
 
+char my_IP_Address[20], my_MAC_Address[20];
 int MQTT_PORT = 1883;
 char my_dir[ 10 ];
 char WiFi_Pass[20];
 char PUB_message[MSG_BUFFER_SIZE], SUB_message[MSG_BUFFER_SIZE];
 char MQTT_in_buffer[MSG_BUFFER_SIZE], MQTT_in_topic[20];
-char my_IP_Address[20];  //  xxx:qsort.xxx.xxx.xxx
+
 int MQTT_in_flag, MQTT_in_length;
-unsigned long epoch = 0, now = 0, interval = 0, pulse, payload_time, period;
+unsigned long epoch = 0, now = 0, interval = 0, pulse, payload_time, period, operiod;
 uint8_t i = 0, rtn = 0, count = 0;
 int net, network, networks;
 int in, then, pa;
@@ -131,20 +137,21 @@ void setup()
   }
   bmx.setSampling(1,1,1, 0,0, BMx280::MODE_NORMAL); 
 
-  Serial.print("chipID=0x"); Serial.println(bmx.chipID(), HEX);
-  Serial.print("hasHumidity="); Serial.println(bmx.hasHumidity());
-  Serial.println("I2C Continuous");
+  //Serial.print("chipID=0x"); Serial.println(bmx.chipID(), HEX);
+  //Serial.print("hasHumidity="); Serial.println(bmx.hasHumidity());
+  //Serial.println("I2C Continuous");
 /*
  *    Construct MQTT tokens
  */ 
-  sprintf( MiS_HEAD,      "%s/%s", MiS_BASE, MiS_DEVICE );
-  sprintf( MQTT_IN,       "%s/%s", MiS_HEAD, IN_TOPIC );
+  sprintf( MiS_HEAD,      "%s/%s", MiS_BASE, MiS_DEVICE );        //  MiS/RAIN_1
   sprintf( MQTT_OUT,      "%s/%s", MiS_HEAD, OUT_TOPIC );
   sprintf( MQTT_RST,      "%s/%s", MiS_HEAD, RST_TOPIC );
   sprintf( MQTT_STATIN,   "%s/%s", MiS_HEAD, STAT_IN_TOPIC );
   sprintf( MQTT_STATOUT,  "%s/%s", MiS_HEAD, STAT_OUT_TOPIC );
-  sprintf( MQTT_TIME,     "%s/%s", MiS_BASE, "TIME");
-  sprintf( MQTT_TIP,      "%s/%s", MiS_HEAD, "TIP");
+  sprintf( MQTT_TIP,      "%s/%s", MiS_HEAD, TIP_TOPIC );
+  sprintf( MQTT_DEVICES,  "%s/%s/%s", MiS_BASE, "DEVICES", MiS_DEVICE );
+  sprintf( MQTT_TIME,     "%s/%s", MiS_BASE, TIME_TOPIC );
+
 /*
  *  decrypt passwords
  */
@@ -160,41 +167,33 @@ void setup()
 
   if (net == -2) fn_ReStart();  // restart wemo
   
-  Serial.print( "Network : " );
-  Serial.println( net );
-
 /*
  *  Connect to recognised WiFi
  */
   int count = 0;
   Serial.println(" WiFi Connecting ");
   fn_WiFi_Connect( net );
-  Serial.print( "IP Address : " );
-  Serial.println( WiFi.localIP().toString().c_str() );
   Serial.println(" WiFi Connected");
-
+  Serial.println(" WiFi Connected ");
+  strcpy(my_IP_Address, WiFi.localIP().toString().c_str());
+  strcpy(my_MAC_Address, WiFi.macAddress().c_str());
 /*
  *  MQTT setup
  */
-   Serial.println (" MQTT Connecting ");
+  Serial.println (" MQTT Connecting ");
   client.setServer(MQTT_server, MQTT_PORT);
+  delay( 100 );
   client.setCallback(MQTT_CB);
-  delay(1000);
+  delay( 100 );
   client.loop();
   fn_MQTT_Connect();
   Serial.println(" MQTT Connected ");
- 
-  epoch = millis();      //  start the clock
 
-  Serial.println("1");
   scale.begin(MY_HXD, MY_HXC);
-  Serial.println("2");
   //scale.set_gain( 128 );
 
   if ( !scale.is_ready() ) delay(1000);
-  Serial.println("3");
   scale.tare(20);
-  Serial.println("4");
   int32_t offset = scale.get_offset();
 
   Serial.print("OFFSET: ");
@@ -217,7 +216,45 @@ void setup()
 
   time_seq = PERIOD * 1000;
 
+  fn_OTA_Setup();
+  
+  sprintf( MQTT_PUB, "%s,%s,%s", "ESP 8266", my_IP_Address, my_MAC_Address );
+  client.publish(MQTT_DEVICES, (const uint8_t*)MQTT_PUB, strlen(MQTT_PUB), false);
+
+  epoch = millis();      //  start the clock
+  delay( 1000 );
+
   Serial.println(" Setup ends ");
+}
+
+void fn_OTA_Setup()
+{
+  // Port defaults to 8266
+	ArduinoOTA.setPort(OTA_port);
+
+  // Hostname defaults to esp8266-[ChipID]
+	ArduinoOTA.setHostname(MiS_DEVICE);
+
+  // No authentication by default
+  ArduinoOTA.setPassword(OTA_pwd);
+
+	ArduinoOTA.onStart([]() {
+		Serial.println("Start");
+	});
+	ArduinoOTA.onEnd([]() {
+		Serial.println("\nEnd");
+	});
+	ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+		Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+	});
+	ArduinoOTA.onError([](ota_error_t error) {
+		Serial.printf("Error[%u]: ", error);
+		if      (error == OTA_AUTH_ERROR)    Serial.println("Auth Failed");
+		else if (error == OTA_BEGIN_ERROR)   Serial.println("Begin Failed");
+		else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+		else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+		else if (error == OTA_END_ERROR)     Serial.println("End Failed");
+	});
 }
 
 void fn_tip( void )
@@ -240,6 +277,8 @@ void fn_tip( void )
   scale.tare(0);
   start_weight = 0;
   tips++;
+//  Serial.print( "Tips ; " );
+//  Serial.println( tips );
 }
 
 /*
@@ -281,7 +320,7 @@ int fn_WiFiScan() {
 /*	Connect to Wifi */
 int fn_WiFi_Connect(int network) {
   int j = 0;
-  delay(2000);
+  delay(1000);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WiFi.SSID(network), WiFi_Pass);
 
@@ -290,7 +329,6 @@ int fn_WiFi_Connect(int network) {
     Serial.print(".");
 	delay(1000);
   }
-
   fn_ReStart();
   return(0);
 }
@@ -299,7 +337,7 @@ int fn_WiFi_Connect(int network) {
  *  MQTT callback
  */
 int MQTT_CB(char* topic, byte* payload, uint8_t length) {
-  Serial.println( "Message Arrived" );
+//  Serial.println( "Message Arrived" );
   int k;
   memset(MQTT_in_topic, 0, sizeof(MQTT_in_topic));
   memset(MQTT_in_buffer, 0, sizeof(MQTT_in_buffer));
@@ -308,15 +346,15 @@ int MQTT_CB(char* topic, byte* payload, uint8_t length) {
   MQTT_in_length = length;
   for (k = 0; k < length; k++) MQTT_in_buffer[k] = (char)payload[k];
   MQTT_in_buffer[k] = 0;
-  Serial.print( "MQTT : " );
-  Serial.print( MQTT_in_topic );
-  Serial.print( " : " );
-  Serial.println( MQTT_in_buffer );
+//  Serial.print( "MQTT : " );
+//  Serial.print( MQTT_in_topic );
+//  Serial.print( " : " );
+//  Serial.println( MQTT_in_buffer );
 
   if ( strcmp( MQTT_in_topic, MQTT_TIME) == 0)  // Time Pulse  
   {
-    Serial.print( "MQTT Time : " );
-    Serial.println( MQTT_in_buffer );
+//  Serial.print( "MQTT Time : " );
+//  Serial.println( MQTT_in_buffer );
 //  1296651311^2025/09/27^14:45:01
 //  012345678901234567890123456789
     for ( i=0; i<=9; i++ )
@@ -325,10 +363,7 @@ int MQTT_CB(char* topic, byte* payload, uint8_t length) {
     }
     a_timestamp[ 10 ] = 0;
     timestamp = atof( a_timestamp );
-    for ( i=11; i<=14; i++ )
-    {
-      a_year[ i - 11 ] = MQTT_in_buffer[ i ];
-    }
+    for ( i=11; i<=14; i++ ) a_year[ i - 11 ] = MQTT_in_buffer[ i ];
     a_year[ 4 ] = 0;
     year = atoi( a_year );
     a_month[ 0 ] = MQTT_in_buffer[ 16 ];
@@ -354,6 +389,7 @@ int MQTT_CB(char* topic, byte* payload, uint8_t length) {
     second = atoi( a_second );
     client.unsubscribe( MQTT_TIME );
   }
+
   if (strcmp(MQTT_in_topic, MQTT_STATIN) == 0)  // Status Enquiry
   {
     if (strcmp(MQTT_in_buffer, "ASK") == 0)
@@ -382,15 +418,20 @@ int fn_MQTT_Connect() {
   int j = 0;
   while (j < 10) {
     if (client.connect(MiS_DEVICE) == 1) {
-      delay(2000);
+      delay(200);
       client.subscribe(MQTT_RST,  1);
+	  delay( 10 );
       client.subscribe(MQTT_STATIN, 1);
+	  delay( 10 );
       client.subscribe(MQTT_TIME, 1);
+	  delay( 10 );
       client.subscribe(MQTT_TIP, 1);
+      client.loop();
+      Serial.println("");
       return (0);
     }
     Serial.print(F("."));
-    delay( 3000 );
+    delay( 1000 );
     j++;
   }
   fn_ReStart();
@@ -406,8 +447,8 @@ void fn_delay( int interval )
   now = millis();
   while ( ( millis() - now ) < interval )
   {
-    delay( 1000 );
-      client.loop();
+    delay( 100 );
+    client.loop();
   }
 }
 
@@ -426,23 +467,36 @@ void loop()
   {
     weight = scale.get_units(10);
     if ( start_weight == 0 ) start_weight = weight;
-   // float readw =   scale.read_average( 10 );
     if ( weight < 0 ) weight = 0 - weight;
     if ( weight > ( TWEIGHT + TWEIGHT ) ) weight = oweight;
-
-    sprintf( MQTT_PUB, "$%05i,%s,%02i:%02i:%02i,%05i,%05i,%07.2f,%07.2f,%07.2f,%07.2f,%0.2f#",
-           sequence, a_date, hour, minute, second, epoch - now, tips, temp, humid, T, P_hPa,  weight );
+    if ( weight >= ( start_weight + TWEIGHT ) ) fn_tip();
+    oweight = weight;
+    period = (millis() - operiod);
+    if ( period < time_seq )
+    {
+       fn_delay( time_seq - period );
+    }
+    period = (millis() - operiod );
+    weight = weight * 100;
+    temp = temp * 100;
+    humid = humid * 100;
+    T = T * 100;
+    P_hPa = P_hPa * 100;
+    sprintf( MQTT_PUB, "$%05i,%05i,%s,%02i:%02i:%02i,%s,%05i,%s,%05.0f,%s,%05.0f,%s,%05.0f,%s,%06.0f,%s,%05.0f#",
+           sequence, period,
+           a_date, hour, minute, second,
+           "Ti:", tips,
+           "T1:", temp,
+           "Hu:", humid,
+           "T2:", T,
+           "Ba:", P_hPa,
+           "Ra:", weight );
     Serial.println( MQTT_PUB );
     if (!client.connected()) fn_MQTT_Connect();
     client.publish(MQTT_OUT, (const uint8_t*)MQTT_PUB, strlen(MQTT_PUB), false);
-
-   // fn_tip();
-
-    if ( weight >= ( start_weight + TWEIGHT ) ) fn_tip();
-    oweight = weight;
   }
-  interval = millis() - epoch;
-
+  if ( period == 0 ) period = time_seq;
+  
   second = second + PERIOD;
   if ( second >= 60 ) {
     minute = minute + 1;
@@ -453,14 +507,13 @@ void loop()
       if ( hour >= 24 ) hour = hour - 24; 
     }
   }
-  if ( hour == 1 ) {
-    if ( minute == 5 ) {
-        client.subscribe( MQTT_TIME );
-    }
+  if ( minute % 10 == 0 ) {
+//  if ( hour == 0 && minute == 0 ) {
+    if (!client.connected()) fn_MQTT_Connect();
+    client.subscribe( MQTT_TIME );
   }
-  now = epoch;
-  if ( interval > ( time_seq ) ) interval = ( time_seq ) -100;
-  fn_delay( ( time_seq ) - interval );
+  ArduinoOTA.handle();
+  operiod = millis();
 }
 //  -- END OF FILE --
 
